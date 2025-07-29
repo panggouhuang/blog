@@ -1,9 +1,9 @@
 # Execution context
 
 ## HttpContextAccessor
-We start by exploring the execution context of an ASP.NET Core web service. If it’s your first time implementing a web service with ASP.NET Core and using the built‑in `HttpContextAccessor` service, you might be curious about how it works. This is because `HttpContextAccessor` is registered as a singleton service, but `HttpContext` is created per request. So how can we use a singleton service to access per‑request data?
+We’re going to explore the execution context of an ASP.NET Core web service. If it’s your first time building a web service with ASP.NET Core and using the built‑in `HttpContextAccessor`, you’re probably wondering how it works. That’s because `HttpContextAccessor` is registered as a singleton service, while `HttpContext` is created per request. So, how can a singleton hold per‑request data?
 
-Let’s take a look at the code of `HttpContextAccessor`:
+Let’s dive into the `HttpContextAccessor` code:
 
 ```csharp
 // Licensed to the .NET Foundation under one or more agreements.
@@ -27,7 +27,7 @@ public class HttpContextAccessor : IHttpContextAccessor
         get => _httpContextCurrent.Value?.Context;
         set
         {
-            // Clear the current HttpContext trapped in the AsyncLocal, as it’s done.
+            // Clear the current HttpContext trapped in the AsyncLocal, since it’s done.
             _httpContextCurrent.Value?.Context = null;
 
             if (value != null)
@@ -46,15 +46,15 @@ public class HttpContextAccessor : IHttpContextAccessor
 }
 ```
 
-If we ignore `HttpContextHolder` (which is essentially a wrapper for `HttpContext`), we see that `HttpContextAccessor` uses a static `AsyncLocal<HttpContextHolder>` to store the current `HttpContext`. It may seem odd to use a static variable to store a per‑request value.
+If we ignore `HttpContextHolder` (which is basically just a wrapper around `HttpContext`), we see that `HttpContextAccessor` uses a static `AsyncLocal<HttpContextHolder>` to store the current `HttpContext`. It might seem strange to use a static variable for something that changes on every request.
 
-Before talking about `AsyncLocal`, let’s first understand **async**.
+Before we get into `AsyncLocal`, let’s make sure we understand **async**.
 
 ## Asynchronous programming
-In my opinion, asynchronous programming is event‑based concurrency. [Concurrency is when two or more tasks can start, run, and complete in overlapping time periods, whereas parallelism is when tasks literally run at the same time.](https://stackoverflow.com/questions/1050222/what-is-the-difference-between-concurrency-and-parallelism) Event‑based means that instead of blocking to wait for an operation to complete, we treat the operation as an event and register a callback to be executed when it finishes.
+For me, asynchronous programming is all about event‑based concurrency. [Concurrency is when two or more tasks can start, run, and complete in overlapping time periods, whereas parallelism is when tasks literally run at the same time.](https://stackoverflow.com/questions/1050222/what-is-the-difference-between-concurrency-and-parallelism) Event‑based means we don’t block and wait—instead, we treat operations as events and register callbacks to run when they finish.
 
 ### Event loop
-The approach is straightforward: register a callback for each event, and when the event occurs, invoke its callback. Your thread essentially waits for events and then executes their callbacks. Within a callback, besides handling the event, you can trigger another event:
+The core idea is simple: register a callback for each event, and when an event fires, the loop invokes its callback. Your thread basically sits in a loop, waiting for events, then running their callbacks—and those callbacks can trigger new events:
 
 ```javascript
 while (true) {
@@ -63,7 +63,7 @@ while (true) {
 }
 ```
 
-Assuming `getNextEvent()` and `event` are already implemented, the most interesting challenge is capturing context in the callback. Normally, a callback isn’t just a static function—it also needs access to the environment in which it was created. Consider this C# example:
+Assuming `getNextEvent()` and `event` are already defined, the tricky part is capturing context in those callbacks. Callbacks aren’t just static functions—they often need access to the environment where they were created. Look at this C# example:
 
 ```csharp
 class Program
@@ -85,7 +85,7 @@ class Program
 }
 ```
 
-The continuation after `DoSomethingAsync` consists of those two `Console.WriteLine` calls, but when it executes, it also needs the value of `a`, which is captured by the lambda’s closure. In C#, lambdas capture their surrounding environment, allowing you to access those variables later. Here, `a` is captured and remains available when the continuation runs. The `async`/`await` keywords are syntactic sugar for this continuation mechanism, making asynchronous code more readable. The following code is functionally equivalent but clearer when chaining continuations:
+The continuation after `DoSomethingAsync` prints two lines, but it also needs the value of `a`. In C#, lambdas capture their surrounding environment so you can access those variables later. Here, `a` is captured and remains available when the continuation runs. The `async`/`await` keywords are just syntactic sugar for this continuation pattern. Here’s an equivalent—but more readable—version:
 
 ```csharp
 public async Task ProcessAsync(int a)
@@ -97,60 +97,68 @@ public async Task ProcessAsync(int a)
 ```
 
 ## AsyncLocal
-Before explaining how AsyncLocal works, let’s discuss why it’s useful. As mentioned, lambdas capture their creation environment. If you need something (like HttpContext) accessible in a continuation, you must ensure the variable is in scope in the caller. Without HttpContextAccessor, you would have to pass HttpContext as a parameter to every method that needs it, so it could be captured by the lambda. This would clutter every method signature with an extra HttpContext parameter.
+Now, why do we need `AsyncLocal`? As we’ve seen, lambdas grab whatever variables are in scope so they can use them later. If you need something like `HttpContext` in a continuation, you’d have to pass it as a parameter everywhere:
 
-This is where AsyncLocal comes in. An ambient context allows you to provide contextual information without explicitly passing it through method parameters. It lets you access certain data (such as HttpContext) from anywhere in the execution flow without having to pass it around.
+```csharp
+public async Task Foo(HttpContext ctx)
+{
+    await Bar(ctx);
+}
 
-In a synchronous world, you could store it in a thread‑local variable, since operations execute one by one. If the previous execution hasn’t finished, the next one can’t start, so you can safely set and clean up.
+public async Task Bar(HttpContext ctx)
+{
+    // …
+}
+```
 
-However, in an asynchronous world, execution can be paused and resumed later. We still need to access the same data in the continuation as we had in the creation context, and we need to support multiple executions running concurrently.
+That quickly clutters your method signatures.
 
-The core implementation of AsyncLocal—which underlies the .NET ExecutionContext—is quite simple. We just need to mimic what lambdas do with their closures: capture the context in the creation environment and then make it available in the continuation. Let’s assume we're implementing this for Node.js to assume there is only one thread.
+This is where **AsyncLocal** comes in—it gives you an ambient context without passing parameters around. You can access certain data (e.g. `HttpContext`) from anywhere in your async flow.
+
+- In a synchronous world, you’d use a thread‑local variable: operations run one after another, so you can safely set and clear.
+- In an asynchronous world, execution can pause and resume, sometimes on different threads, but you still want the same context available in your continuations—possibly with multiple executions happening at once.
+
+The core of `AsyncLocal` (which underpins .NET’s `ExecutionContext`) is pretty simple: mimic what closures do. Capture the context when you start, then restore it when you continue. Here’s a simplified Node.js‑style example assuming a single thread:
+
 ```typescript
 class ExecutionContext {
     public static current: ExecutionContext = new ExecutionContext();
-
     public value: number;
+
     public static Capture(): ExecutionContext {
         return new ExecutionContext(ExecutionContext.current);
     }
 
-    public constructor(context?: ExecutionContext)
-    {
-       this.value = 0;
-       if(context) {
-         this.value = context.value;
-       }
+    constructor(context?: ExecutionContext) {
+        this.value = context ? context.value : 0;
     }
 
     public static Run(context: ExecutionContext, cb: () => void): void {
-        var previousContext = ExecutionContext.Capture();
-        if(previousContext == context) {
+        const previous = ExecutionContext.current;
+        if (previous === context) {
             cb();
             return;
         }
         ExecutionContext.current = context;
         cb();
-        ExecutionContext.current = previousContext;
+        ExecutionContext.current = previous;
     }
 }
 
-
 async function timeout() {
-    await new Promise(resolve => {
-        setTimeout(resolve, Math.random() * 100);
-    })
+    await new Promise(resolve => setTimeout(resolve, Math.random() * 100));
 }
 
-async function runWithContext(value: number) {
-    var ec = ExecutionContext.Capture();
-    ec.value = value;
+async function runWithContext(val: number) {
+    const ec = ExecutionContext.Capture();
+    ec.value = val;
     await timeout();
     ExecutionContext.Run(ec, () => {
         console.log(ExecutionContext.current.value);
     });
 }
+
 (async () => {
-   await Promise.all([runWithContext(1), runWithContext(2), runWithContext(3)]);
+    await Promise.all([runWithContext(1), runWithContext(2), runWithContext(3)]);
 })();
 ```
