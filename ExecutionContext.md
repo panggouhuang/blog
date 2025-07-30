@@ -162,3 +162,34 @@ async function runWithContext(val: number) {
     await Promise.all([runWithContext(1), runWithContext(2), runWithContext(3)]);
 })();
 ```
+
+### Immutable
+Every time we capture the current context with a snapshot and restore it in the callback, we must ensure the context is unchangeable; otherwise, it would be shared between multiple async flows, which breaks the notion of being **local**. ASP.NET Core achieves this by using copy-on-write semantics: it only copies the context when it’s modified. Since `ExecutionContext.Capture` and `ExecutionContext.Run` are on the hottest path and modifications to the `ExecutionContext` are rare, this strategy eliminates memory allocations in most cases while still maintaining lock-free behavior. The code below will always print out `42`. Check more details in [Stepen Toub's blog post](https://devblogs.microsoft.com/dotnet/how-async-await-really-works/#async/await-under-the-covers):
+
+```csharp
+var number = new AsyncLocal<int>();
+
+number.Value = 42;
+ThreadPool.QueueUserWorkItem(_ => Console.WriteLine(number.Value));
+number.Value = 0;
+
+Console.ReadLine();
+```
+
+### Async shared
+If you’d like the value to be shared across all async flows after creation, store a reference type in the AsyncLocal<T> and then update its field when you want to change the value, like this:
+
+```csharp
+var number = new AsyncLocal<NumberHolder>();
+
+number.Value = new NumberHolder() { Value = 42 };
+ThreadPool.QueueUserWorkItem(_ => Console.WriteLine(number.Value.Value));
+number.Value.Value = 0;
+
+Console.ReadLine();
+
+internal class NumberHolder
+{
+	public int Value { get; set; }
+}
+```
