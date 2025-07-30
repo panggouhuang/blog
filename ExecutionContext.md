@@ -190,7 +190,7 @@ Console.ReadLine();
 
 internal class NumberHolder
 {
-	public int Value { get; set; }
+    public int Value { get; set; }
 }
 ```
 But with this approach, you must be careful and make sure the reference type is thread-safe, as it can be accessed from multiple threads at the same time.
