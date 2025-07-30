@@ -177,7 +177,7 @@ Console.ReadLine();
 ```
 
 ### Async shared
-If you’d like the value to be shared across all async flows after creation, store a reference type in the AsyncLocal<T> and then update its field when you want to change the value, like this:
+If you’d like the value to be shared across all subsequent async flows after creation, store a reference type in the AsyncLocal<T> and then update its field when you want to change the value, like this:
 
 ```csharp
 var number = new AsyncLocal<NumberHolder>();
